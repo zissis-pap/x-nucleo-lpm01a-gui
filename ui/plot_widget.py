@@ -1,25 +1,27 @@
 """
 Real-time current / energy plot using pyqtgraph.
 
-Features
-────────
-• Rolling circular buffer (configurable max samples)
-• Adaptive Y-axis auto-range with unit scaling (nA / µA / mA / A)
-• X-axis shows time in seconds (derived from sample index × sample period)
-• Visual markers for timestamps, overcurrent events
-• Toolbar: window size selector, clear, export CSV
+Performance design
+──────────────────
+• _RingBuffer  — pre-allocated numpy array; no Python-object overhead,
+                 no full-buffer copy on every update.
+• Dirty flag   — add_samples() only marks new data; a 30 FPS QTimer
+                 drives rendering, completely decoupling data rate from
+                 paint rate.
+• Min-max decimation — preserves peaks and valleys that stride decimation
+                 silently drops, at no extra cost.
+• antialias=False — software anti-aliasing is expensive at large point
+                 counts; disable it for the waveform (axes stay sharp).
 """
 
 from __future__ import annotations
 
 import csv
 import math
-from collections import deque
-from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QComboBox, QFileDialog, QHBoxLayout, QLabel,
     QPushButton, QVBoxLayout, QWidget,
@@ -35,8 +37,12 @@ CLR_TIMESTAMP = "#e0c030"
 CLR_OVERCURR  = "#e05050"
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _scale_current(values_a: np.ndarray) -> tuple[np.ndarray, str]:
-    """Return (scaled_array, unit_string) for the best unit."""
+    """Return (scaled_array, unit_string) for the most readable unit."""
     if len(values_a) == 0:
         return values_a, "µA"
     peak = float(np.max(np.abs(values_a)))
@@ -51,23 +57,119 @@ def _scale_current(values_a: np.ndarray) -> tuple[np.ndarray, str]:
     return values_a, "A"
 
 
-class PlotWidget(QWidget):
-    """pyqtgraph-based real-time waveform widget."""
+def _minmax_decimate(y: np.ndarray, max_points: int) -> np.ndarray:
+    """Decimate by keeping the min and max of each bin.
 
-    MAX_BUFFER   = 5_000_000   # 5 M samples in ring buffer (~40 MB)
-    MAX_DISPLAY  = 10_000      # points drawn at once (performance limit)
+    Unlike stride decimation, this preserves narrow spikes and valleys that
+    would otherwise be lost.  Returns at most max_points points (always even).
+    """
+    n = len(y)
+    if n <= max_points:
+        return y
+    bins = max_points // 2
+    length = (n // bins) * bins          # trim to a whole number of bins
+    grouped = y[:length].reshape(bins, -1)
+    result = np.empty(bins * 2, dtype=y.dtype)
+    result[0::2] = grouped.min(axis=1)
+    result[1::2] = grouped.max(axis=1)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Ring buffer
+# ---------------------------------------------------------------------------
+
+class _RingBuffer:
+    """Pre-allocated numpy circular buffer.
+
+    Avoids the per-element Python object overhead of a deque[float] and
+    allows zero-copy slicing of the tail (window) without touching the
+    rest of the buffer.
+    """
+
+    def __init__(self, maxsize: int) -> None:
+        self._buf    = np.empty(maxsize, dtype=np.float64)
+        self._maxsize = maxsize
+        self._write  = 0   # index of the next write position
+        self._count  = 0   # number of valid samples (≤ maxsize)
+
+    # -- write ----------------------------------------------------------------
+
+    def extend(self, data: np.ndarray) -> None:
+        n = len(data)
+        if n == 0:
+            return
+        if n >= self._maxsize:
+            # Incoming data fills or overflows the entire buffer
+            self._buf[:] = data[-self._maxsize:]
+            self._write  = 0
+            self._count  = self._maxsize
+            return
+        end = self._write + n
+        if end <= self._maxsize:
+            self._buf[self._write:end] = data
+        else:
+            split = self._maxsize - self._write
+            self._buf[self._write:] = data[:split]
+            self._buf[:end - self._maxsize] = data[split:]
+        self._write = end % self._maxsize
+        self._count = min(self._count + n, self._maxsize)
+
+    # -- read -----------------------------------------------------------------
+
+    def tail(self, n: int) -> np.ndarray:
+        """Return the last n samples as a contiguous array (copy)."""
+        n = min(n, self._count)
+        if n == 0:
+            return np.empty(0, dtype=np.float64)
+        end   = self._write
+        start = (end - n) % self._maxsize
+        if start < end:
+            return self._buf[start:end].copy()
+        return np.concatenate((self._buf[start:], self._buf[:end]))
+
+    def all(self) -> np.ndarray:
+        """Return every valid sample in chronological order (copy)."""
+        return self.tail(self._count)
+
+    # -- misc -----------------------------------------------------------------
+
+    def __len__(self) -> int:
+        return self._count
+
+    def clear(self) -> None:
+        self._write = 0
+        self._count = 0
+
+
+# ---------------------------------------------------------------------------
+# Widget
+# ---------------------------------------------------------------------------
+
+class PlotWidget(QWidget):
+    """pyqtgraph real-time waveform with rate-limited rendering."""
+
+    MAX_BUFFER  = 5_000_000   # samples kept in ring buffer (~40 MB)
+    MAX_DISPLAY = 10_000      # points sent to renderer per frame
+    _REFRESH_MS = 33          # render timer interval (~30 FPS)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
-        self._buffer: deque[float] = deque(maxlen=self.MAX_BUFFER)
-        self._sample_rate_hz: float = 100.0   # used for x-axis time scaling
-        self._total_samples: int = 0          # monotonically increasing
+        self._ring           = _RingBuffer(self.MAX_BUFFER)
+        self._sample_rate_hz = 100.0
+        self._total_samples  = 0
+        self._dirty          = False   # True when unrendered data exists
 
-        # Timestamp markers: (sample_index, time_ms)
         self._ts_markers: list[tuple[int, int]] = []
 
         self._build_ui()
+
+        # Render timer — fires at ~30 FPS, redraws only when data changed
+        self._render_timer = QTimer(self)
+        self._render_timer.setInterval(self._REFRESH_MS)
+        self._render_timer.timeout.connect(self._maybe_update_curve)
+        self._render_timer.start()
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -94,6 +196,7 @@ class PlotWidget(QWidget):
             self.window_combo.addItem(label, n)
         self.window_combo.setCurrentIndex(0)
         self.window_combo.setToolTip("Number of samples visible in the plot")
+        self.window_combo.currentIndexChanged.connect(self._force_update)
         toolbar.addWidget(self.window_combo)
 
         toolbar.addSpacing(12)
@@ -119,8 +222,9 @@ class PlotWidget(QWidget):
 
         root.addLayout(toolbar)
 
-        # pyqtgraph PlotWidget
-        pg.setConfigOptions(antialias=True, useOpenGL=False)
+        # pyqtgraph canvas — antialias off for the waveform (too costly at
+        # high point counts); axes and labels remain sharp regardless.
+        pg.setConfigOptions(antialias=False, useOpenGL=False)
         self._pw = pg.PlotWidget()
         self._pw.setBackground(CLR_BG)
         self._pw.showGrid(x=True, y=True)
@@ -131,18 +235,13 @@ class PlotWidget(QWidget):
         self._pw.getAxis("bottom").setLabel("Time", units="s", color=CLR_AXIS)
         self._pw.getAxis("left").setLabel("Current", units="µA", color=CLR_AXIS)
         self._pw.setMouseEnabled(x=True, y=True)
-
-        # Grid styling
-        grid_pen = pg.mkPen(color=CLR_GRID, width=1, style=Qt.DotLine)
         self._pw.getAxis("bottom").setGrid(60)
         self._pw.getAxis("left").setGrid(60)
 
-        # Main measurement curve
         self._curve = self._pw.plot(
             pen=pg.mkPen(color=CLR_CURVE, width=1.2),
         )
 
-        # Infinite vertical lines for timestamps
         self._ts_lines: list[pg.InfiniteLine] = []
 
         root.addWidget(self._pw, 1)
@@ -153,11 +252,12 @@ class PlotWidget(QWidget):
         self._sample_rate_hz = max(hz, 1e-3)
 
     def add_samples(self, samples: list[float]) -> None:
+        """Buffer incoming samples; do NOT redraw here."""
         if not samples:
             return
-        self._buffer.extend(samples)
+        self._ring.extend(np.asarray(samples, dtype=np.float64))
         self._total_samples += len(samples)
-        self._update_curve()
+        self._dirty = True
 
     def add_timestamp(self, sample_idx: int, time_ms: int) -> None:
         self._ts_markers.append((sample_idx, time_ms))
@@ -184,50 +284,47 @@ class PlotWidget(QWidget):
         self._pw.addItem(line)
 
     def clear(self) -> None:
-        self._buffer.clear()
+        self._ring.clear()
         self._total_samples = 0
         self._ts_markers.clear()
         for line in self._ts_lines:
             self._pw.removeItem(line)
         self._ts_lines.clear()
         self._curve.setData([], [])
+        self._dirty = False
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
+    def _force_update(self) -> None:
+        """Trigger an immediate repaint (e.g. when the window selector changes)."""
+        self._dirty = True
+
+    def _maybe_update_curve(self) -> None:
+        """Timer slot: skip the paint entirely if nothing changed."""
+        if not self._dirty:
+            return
+        self._dirty = False
+        self._update_curve()
+
     def _update_curve(self) -> None:
-        window = self.window_combo.currentData() or 0
-        buf = list(self._buffer)
+        window   = self.window_combo.currentData() or 0
+        n_wanted = window if window > 0 else len(self._ring)
 
-        if window > 0 and len(buf) > window:
-            buf = buf[-window:]
-
-        if not buf:
+        y_raw = self._ring.tail(n_wanted)
+        if len(y_raw) == 0:
             return
 
-        # Decimate for display if too many points
-        y_raw = np.array(buf, dtype=np.float64)
-        if len(y_raw) > self.MAX_DISPLAY:
-            step = max(1, len(y_raw) // self.MAX_DISPLAY)
-            y_raw = y_raw[::step]
+        y_dec    = _minmax_decimate(y_raw, self.MAX_DISPLAY)
+        y_scaled, unit = _scale_current(y_dec)
 
-        y_scaled, unit = _scale_current(y_raw)
-
-        # X axis in seconds
-        n = len(y_scaled)
-        # Start sample offset within the full buffer
-        buf_len = len(self._buffer)
-        window_len = min(window, buf_len) if window > 0 else buf_len
-        start_sample = self._total_samples - window_len
-        end_sample = self._total_samples
+        start_sample = self._total_samples - len(y_raw)
         x = np.linspace(
             start_sample / self._sample_rate_hz,
-            end_sample / self._sample_rate_hz,
-            n,
+            self._total_samples / self._sample_rate_hz,
+            len(y_scaled),
         )
 
         self._curve.setData(x, y_scaled)
-
-        # Update Y axis label
         self._pw.getAxis("left").setLabel("Current", units=unit, color=CLR_AXIS)
 
         if self.autorange_btn.isChecked():
@@ -241,8 +338,8 @@ class PlotWidget(QWidget):
         )
         if not path:
             return
-        data = list(self._buffer)
-        dt = 1.0 / self._sample_rate_hz
+        data = self._ring.all()
+        dt   = 1.0 / self._sample_rate_hz
         with open(path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["index", "time_s", "current_A"])

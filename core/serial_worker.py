@@ -278,11 +278,17 @@ class SerialWorker(QThread):
                         self._binary_parser.reset()
                     self.acq_changed.emit(True)
                     self.log_message.emit("[Acquisition started]")
-                    # If there's leftover in resp_buf treat it as data
                     if self._resp_buf:
-                        leftover = self._resp_buf.encode("ascii", errors="replace")
-                        self._resp_buf = ""
-                        self._handle_acquisition_data(leftover, fmt)
+                        if fmt == "ascii_dec":
+                            # ASCII leftover is intact text — safe to parse.
+                            leftover = self._resp_buf.encode("ascii", errors="replace")
+                            self._resp_buf = ""
+                            self._handle_acquisition_data(leftover, fmt)
+                        else:
+                            # Binary leftover has been corrupted by the ASCII
+                            # decoder — discard it.  Clean binary frames will
+                            # arrive in the next ser.read() call.
+                            self._resp_buf = ""
                     return
 
             elif cmd_line.startswith("err "):
