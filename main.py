@@ -31,7 +31,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("X-NUCLEO-LPM01A Power Monitor")
     app.setOrganizationName("PowerShield")
-    app.setApplicationVersion("1.0.0")
+    app.setApplicationVersion("0.01")
 
     # Apply dark theme
     app.setStyleSheet(DARK_THEME)
