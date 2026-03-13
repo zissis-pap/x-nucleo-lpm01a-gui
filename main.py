@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import QApplication
 
 from ui.main_window import MainWindow
 from ui.styles import DARK_THEME
+from version import __version__
 
 
 def main() -> int:
@@ -31,7 +32,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("X-NUCLEO-LPM01A Power Monitor")
     app.setOrganizationName("PowerShield")
-    app.setApplicationVersion("0.01")
+    app.setApplicationVersion(__version__)
 
     # Apply dark theme
     app.setStyleSheet(DARK_THEME)

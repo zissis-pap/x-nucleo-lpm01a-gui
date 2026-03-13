@@ -16,27 +16,29 @@ from __future__ import annotations
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
-    QApplication, QHBoxLayout, QMainWindow,
-    QScrollArea, QSplitter, QStatusBar,
+    QAction, QApplication, QHBoxLayout, QMainWindow,
+    QMenu, QMenuBar, QScrollArea, QSplitter, QStatusBar,
     QVBoxLayout, QWidget,
 )
 
 from core.data_parser import ParsedData
 from core.protocol import Commands
 from core.serial_worker import SerialWorker
+from ui.about_dialog import AboutDialog
 from ui.config_panel import ConfigPanel
 from ui.connection_panel import ConnectionPanel
 from ui.console_widget import ConsoleWidget
 from ui.control_panel import ControlPanel
 from ui.plot_widget import PlotWidget
 from ui.stats_panel import StatsPanel
+from version import __version__
 
 
 class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("X-NUCLEO-LPM01A  Power Monitor")
+        self.setWindowTitle(f"X-NUCLEO-LPM01A  Power Monitor  v{__version__}")
         self.resize(1280, 800)
         self.setMinimumSize(900, 600)
 
@@ -51,6 +53,7 @@ class MainWindow(QMainWindow):
         # ── Build UI ──────────────────────────────────────────────────────────
         self._build_ui()
         self._wire_signals()
+        self._build_menu()
 
         # ── Periodic plot refresh (50 ms = 20 FPS) ─────────────────────────
         # The plot widget itself calls _update_curve on add_samples, but we
@@ -62,6 +65,14 @@ class MainWindow(QMainWindow):
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage("Not connected – select a port and click Connect.")
+
+    # ── Menu bar ──────────────────────────────────────────────────────────────
+
+    def _build_menu(self) -> None:
+        help_menu = self.menuBar().addMenu("Help")
+        about_action = QAction("About", self)
+        about_action.triggered.connect(lambda: AboutDialog(self).exec_())
+        help_menu.addAction(about_action)
 
     # ── UI construction ───────────────────────────────────────────────────────
 
