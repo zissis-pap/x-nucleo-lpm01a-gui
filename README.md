@@ -12,7 +12,68 @@
 [![NumPy](https://img.shields.io/badge/NumPy-1.21%2B-013243?logo=numpy&logoColor=white)](https://numpy.org/)
 [![pyserial](https://img.shields.io/badge/pyserial-3.5%2B-FFD43B)](https://pyserial.readthedocs.io/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.01-informational)](main.py)
+[![Version](https://img.shields.io/badge/version-1.000-informational)](version.py)
+
+---
+
+## Changelog
+
+### v1.000 (2026-03-13)
+
+**New Features**
+- Added About dialog with version info, dependencies, and license
+- Full dark theme with custom styling
+- High-DPI scaling support for Retina/4K displays
+- Ring buffer implementation for efficient memory usage (up to 5M samples)
+- Min-max decimation for accurate waveform rendering at high sample counts
+- Rate-limited rendering (30 FPS) to reduce CPU usage
+- Target power-cycle during acquisition (observe power-up transients)
+- Temperature readout during acquisition
+- Version tracking via `version.py`
+- Serial port auto-scan on startup
+
+**Performance Improvements**
+- Zero-copy ring buffer with pre-allocated numpy arrays
+- Decoupled data acquisition from rendering (no UI blocking)
+- Min-max binning preserves peaks/valleys during zoom
+- Optimized serial I/O thread with mutex locking
+
+**Bug Fixes**
+- Fixed non-standard baud rate handling on Linux
+- Improved error handling for command responses
+- Better handling of binary data stream corruption
+
+---
+
+## User Interface
+
+### Dark Theme
+The application features a professionally designed dark theme with:
+- Deep blue-gray background (`#12121e`)
+- Teal accent colors for primary actions (`#00c8d0`)
+- Color-coded console messages (teal for sent, amber for metadata)
+- Custom-styled widgets with hover/pressed states
+
+### High-DPI Support
+Automatic scaling for Retina/4K displays ensures crisp text and graphics on
+high-resolution screens without manual configuration.
+
+### About Dialog
+Accessible via **Help → About**, the dialog displays:
+- Application version
+- Python and library versions
+- Author and license information
+
+### Layout
+```
+┌─────────────────────────────────────────────────────────┐
+│ Left sidebar (290 px)      │ Centre area                  │
+│  ConnectionPanel           │  PlotWidget (stretches)      │
+│  ConfigPanel (scrollable)  │  StatsPanel (below plot)     │
+│  ControlPanel              ├──────────────────────────────┤
+│                            │ ConsoleWidget (bottom drawer)│
+└─────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -33,6 +94,13 @@ Windows-only tool with a cross-platform GUI written entirely in Python.
 - CSV export of the current buffer
 - Serial console with raw command input
 
+**User Interface**
+
+- Dark theme for reduced eye strain and better visibility
+- High-DPI support for Retina/4K displays
+- About dialog with version and dependency information
+- Responsive layout with configurable panels
+
 ---
 
 ## How It Works
@@ -42,17 +110,21 @@ Windows-only tool with a cross-platform GUI written entirely in Python.
 ```
 main.py
   └─ MainWindow (ui/main_window.py)
-       ├─ ConnectionPanel  – port selection, device info
-       ├─ ConfigPanel      – measurement parameters
-       ├─ ControlPanel     – start / stop, host control, utilities
-       ├─ PlotWidget       – pyqtgraph real-time waveform
-       ├─ StatsPanel       – live statistics sidebar
-       └─ ConsoleWidget    – raw serial log + command input
+        ├─ ConnectionPanel  – port selection, device info
+        ├─ ConfigPanel      – measurement parameters
+        ├─ ControlPanel     – start / stop, host control, utilities
+        ├─ PlotWidget       – pyqtgraph real-time waveform with ring buffer
+        ├─ StatsPanel       – live statistics sidebar
+        ├─ ConsoleWidget    – raw serial log + command input
+        └─ AboutDialog      – version & license info (v1.000+)
 
 core/
   ├─ protocol.py      – command builders (ASCII strings → bytes)
-  ├─ serial_worker.py – QThread: serial I/O state machine
+  ├─ serial_worker.py – QThread: serial I/O state machine with termios2
   └─ data_parser.py   – AsciiParser / BinaryParser for measurement streams
+
+ui/
+  └─ styles.py        – dark theme stylesheet (v1.000+)
 ```
 
 ### Communication
@@ -102,7 +174,7 @@ pip install -r requirements.txt
 | [pyserial](https://pyserial.readthedocs.io/) | Serial port access |
 
 > **Linux note:** The application sets the non-standard 3 686 400 baud rate
-> via `termios2`. No extra packages are required; this uses the standard
+> via `termios2`/`ioctl`. No extra packages are required; this uses the standard
 > `fcntl` and `struct` modules.
 
 ---
@@ -159,7 +231,7 @@ python main.py
    | Calibrate | `calib` | Run self-calibration (recommended after >5 °C temperature shift) |
    | Auto-test | `autotest` | Run board self-diagnostics |
    | Board Reset | `psrst` | Hardware reset of the PowerShield |
-   | Target Reset | `targrst` | Power-cycle the target for a configurable duration; can be used during acquisition to observe the power-up transient |
+   | Target Reset | `targrst` | Power-cycle the target for a configurable duration (0.001–1.0 s); can be used during acquisition to observe the power-up transient |
 
 6. **Console** — the bottom drawer shows every sent (`>>`) and received (`<<`)
    serial line. Type raw commands into the input field and press **Send** or
@@ -171,24 +243,38 @@ python main.py
 
 ```
 x-nucleo-lpm01a-gui/
-├── main.py               # Entry point
+├── main.py               # Entry point (High-DPI, app setup)
+├── version.py            # Version tracking (v1.000+)
 ├── requirements.txt      # Python dependencies
 ├── assets/
 │   └── app.png           # Application screenshot
 ├── core/
 │   ├── protocol.py       # Command builders
-│   ├── serial_worker.py  # Async serial I/O (QThread)
+│   ├── serial_worker.py  # Async serial I/O (QThread, termios2)
 │   └── data_parser.py    # ASCII and binary stream parsers
 └── ui/
     ├── main_window.py    # Top-level window and signal wiring
     ├── connection_panel.py
     ├── config_panel.py
     ├── control_panel.py
-    ├── plot_widget.py
+    ├── plot_widget.py    # Ring buffer + min-max decimation
     ├── stats_panel.py
     ├── console_widget.py
-    └── styles.py         # Dark theme stylesheet
+    ├── about_dialog.py   # Version & license dialog (v1.000+)
+    └── styles.py         # Dark theme stylesheet (v1.000+)
 ```
+
+### File Changes in v1.000
+
+| File | Changes |
+|------|---------|
+| `main.py` | Added High-DPI scaling, About dialog menu |
+| `version.py` | New file for version tracking |
+| `ui/main_window.py` | Added Help → About menu, improved signal handling |
+| `ui/about_dialog.py` | New file for version/license dialog |
+| `ui/styles.py` | New dark theme stylesheet |
+| `ui/plot_widget.py` | Ring buffer, min-max decimation, rate-limited rendering |
+| `core/serial_worker.py` | Improved termios2 handling, better error recovery |
 
 ---
 
