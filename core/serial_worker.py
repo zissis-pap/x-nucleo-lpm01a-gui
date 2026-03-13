@@ -165,6 +165,11 @@ class SerialWorker(QThread):
             self._keep_running = False
         self.wait(3000)
 
+    def request_disconnect(self) -> None:
+        """Signal the worker to stop without blocking the caller."""
+        with QMutexLocker(self._lock):
+            self._keep_running = False
+
     def send_command(self, cmd_bytes: bytes, cmd_name: str = "") -> None:
         with QMutexLocker(self._lock):
             self._cmd_queue.append((cmd_bytes, cmd_name))
@@ -204,7 +209,7 @@ class SerialWorker(QThread):
                         self.log_message.emit(f">> {display}")
                         with QMutexLocker(self._lock):
                             self._pending_cmd_name = cmd_name
-                    except serial.SerialException as exc:
+                    except (serial.SerialException, OSError) as exc:
                         self.log_message.emit(f"[Send error] {exc}")
 
             # ── Read available data ───────────────────────────────────────
@@ -214,7 +219,7 @@ class SerialWorker(QThread):
                     self.msleep(1)
                     continue
                 raw = ser.read(min(waiting, 65536))
-            except serial.SerialException as exc:
+            except (serial.SerialException, OSError) as exc:
                 self.log_message.emit(f"[Read error] {exc}")
                 break
 
@@ -265,7 +270,7 @@ class SerialWorker(QThread):
 
             if cmd_line.startswith("ack "):
                 parts = cmd_line[4:].strip().split(None, 1)
-                cmd = parts[0] if parts else ""
+                cmd = parts[0].rstrip(":") if parts else ""
                 payload = parts[1] if len(parts) > 1 else ""
                 self.cmd_result.emit(True, cmd, payload)
 

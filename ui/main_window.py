@@ -152,9 +152,7 @@ class MainWindow(QMainWindow):
         self.ctrl_panel.autotest_requested.connect(
             lambda: self._send(Commands.autotest(), "autotest")
         )
-        self.ctrl_panel.psrst_requested.connect(
-            lambda: self._send(Commands.psrst(), "psrst")
-        )
+        self.ctrl_panel.psrst_requested.connect(self._on_psrst)
         self.ctrl_panel.targrst_requested.connect(self._on_targrst)
 
         # Console raw command
@@ -193,7 +191,9 @@ class MainWindow(QMainWindow):
         elif cmd == "version" and success:
             self.conn_panel.set_firmware(payload.strip())
         elif cmd == "temp" and success:
-            self.conn_panel.set_temperature(payload.strip())
+            parts = payload.strip().split()
+            value = parts[-1] if parts else payload.strip()
+            self.conn_panel.set_temperature(f"{value} °C")
 
         prefix = "ACK" if success else "ERR"
         label = f"[{prefix}] {cmd} {payload}".strip()
@@ -260,6 +260,10 @@ class MainWindow(QMainWindow):
 
     def _on_stop_acquisition(self) -> None:
         self._send(Commands.stop(), "stop")
+
+    def _on_psrst(self) -> None:
+        self._send(Commands.psrst(), "psrst")
+        QTimer.singleShot(300, self._worker.request_disconnect)
 
     def _on_targrst(self, ms: int) -> None:
         self._send(Commands.targrst(ms), "targrst")
